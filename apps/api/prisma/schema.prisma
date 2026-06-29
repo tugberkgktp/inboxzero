@@ -1,0 +1,76 @@
+// InboxZero data model.
+// Three tables per the challenge spec: users, jobs, items.
+// `migrate dev` / `migrate deploy` generate the SQL migration files in ./migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  jobs  Job[]
+  items Item[]
+
+  @@map("users")
+}
+
+model Job {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  status     JobStatus @default(processing)
+  totalItems Int       @map("total_items")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items Item[]
+
+  @@index([userId])
+  @@map("jobs")
+}
+
+model Item {
+  id        String     @id @default(uuid())
+  jobId     String     @map("job_id")
+  userId    String     @map("user_id") // denormalized for safe per-user scoping
+  inputText String     @map("input_text")
+  status    ItemStatus @default(queued)
+  attempts  Int        @default(0)
+
+  // AI results (nullable until processed):
+  category       String?
+  priority       Int?
+  sentiment      String?
+  summary        String?
+  suggestedReply String? @map("suggested_reply")
+  error          String?
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([userId])
+  @@map("items")
+}
+
+enum JobStatus {
+  processing
+  completed
+}
+
+enum ItemStatus {
+  queued
+  processing
+  done
+  failed
+}

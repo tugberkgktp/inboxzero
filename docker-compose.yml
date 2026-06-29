@@ -1,0 +1,85 @@
+# Brings up the full local stack with one command: `docker compose up --build`
+# Services: postgres + redis + (one-shot migrate) + api + worker.
+# The worker is its OWN service, sharing the api image with a different command.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: inboxzero
+      POSTGRES_PASSWORD: inboxzero
+      POSTGRES_DB: inboxzero
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inboxzero"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: applies committed migration files, then exits.
+  migrate:
+    build: ./apps/api
+    command: npx prisma migrate deploy
+    environment:
+      DATABASE_URL: postgresql://inboxzero:inboxzero@postgres:5432/inboxzero
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: ./apps/api
+    command: node dist/index.js
+    environment:
+      DATABASE_URL: postgresql://inboxzero:inboxzero@postgres:5432/inboxzero
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      PORT: 4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: ./apps/api
+    command: node dist/worker.js
+    environment:
+      DATABASE_URL: postgresql://inboxzero:inboxzero@postgres:5432/inboxzero
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
+      JOB_ATTEMPTS: ${JOB_ATTEMPTS:-3}
+      JOB_BACKOFF_MS: ${JOB_BACKOFF_MS:-1000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
