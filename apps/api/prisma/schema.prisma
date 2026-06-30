@@ -41,6 +41,7 @@ model Item {
   id        String     @id @default(uuid())
   jobId     String     @map("job_id")
   userId    String     @map("user_id") // denormalized for safe per-user scoping
+  position  Int        @default(0) // index within its batch, for stable ordering
   inputText String     @map("input_text")
   status    ItemStatus @default(queued)
   attempts  Int        @default(0)

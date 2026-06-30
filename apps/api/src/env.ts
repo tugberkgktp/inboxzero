@@ -23,8 +23,14 @@ const schema = z.object({
   JOB_ATTEMPTS: z.coerce.number().default(3),
   JOB_BACKOFF_MS: z.coerce.number().default(1000),
 
-  // Max items accepted per batch (spec suggests 20-50).
+  // Proactive AI rate limit: at most AI_RATE_MAX calls per AI_RATE_DURATION_MS,
+  // sized to stay under the provider's free-tier limit and avoid 429s.
+  AI_RATE_MAX: z.coerce.number().default(20),
+  AI_RATE_DURATION_MS: z.coerce.number().default(60_000),
+
+  // Guards on batch size and per-item length (bounds token usage and abuse).
   MAX_BATCH_ITEMS: z.coerce.number().default(50),
+  MAX_ITEM_CHARS: z.coerce.number().default(4000),
 
   // CORS origin for the deployed frontend (comma-separated allowed).
   CORS_ORIGIN: z.string().default("*"),
@@ -38,3 +44,17 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+
+// In production, refuse to boot with a weak or default signing secret so a
+// deploy can never silently run with forgeable tokens.
+if (env.NODE_ENV === "production") {
+  const weak =
+    env.JWT_SECRET.length < 32 ||
+    /change-me|dev-secret|secret/i.test(env.JWT_SECRET);
+  if (weak) {
+    console.error(
+      "Refusing to start: JWT_SECRET must be a strong (>=32 char) random value in production.",
+    );
+    process.exit(1);
+  }
+}

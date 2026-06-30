@@ -1,11 +1,10 @@
 // AI triage layer.
 //
-// Two important design choices for this challenge:
-//  1. If GROQ_API_KEY is missing, we fall back to a DETERMINISTIC STUB so the
-//     entire async pipeline (queue/retries/idempotency/rollup) can be tested
-//     and demoed with zero API key and zero cost.
-//  2. The FAIL simulation: any item whose text contains "FAIL" throws, so we
-//     can demonstrate retries + failure isolation + manual retry on demand.
+// Falls back to a deterministic local classifier when GROQ_API_KEY is unset, so
+// the service has no hard dependency on an external provider for development or
+// CI. Inputs containing the token FAIL raise a transient error, which exercises
+// the worker's retry and failure-isolation paths without depending on the
+// provider actually failing.
 import { env } from "./env";
 
 export interface TriageResult {
@@ -19,10 +18,21 @@ export interface TriageResult {
 /** Thrown for transient-style failures that should be retried by BullMQ. */
 export class TransientAiError extends Error {}
 
+/**
+ * Thrown when the provider rate-limits us (HTTP 429). Carries how long to wait.
+ * The worker treats this differently from a normal failure: it pauses the queue
+ * and retries WITHOUT consuming one of the item's retry attempts.
+ */
+export class ProviderRateLimitError extends Error {
+  constructor(public retryAfterMs: number) {
+    super(`Provider rate limited; retry after ${retryAfterMs}ms`);
+  }
+}
+
 const CATEGORIES = ["bug", "billing", "feature-request", "spam", "other"];
 
 export async function classify(inputText: string): Promise<TriageResult> {
-  // Demo hook: simulate a failing item. Documented in the README.
+  // Deterministic failure trigger for exercising retry/failure handling.
   if (inputText.toUpperCase().includes("FAIL")) {
     throw new TransientAiError("Simulated AI failure (item contained 'FAIL')");
   }
@@ -34,8 +44,9 @@ export async function classify(inputText: string): Promise<TriageResult> {
 }
 
 /**
- * Real provider: Groq (OpenAI-compatible chat completions).
- * Kept intentionally trivial — one cheap classification prompt per item.
+ * Groq via its OpenAI-compatible chat completions endpoint.
+ * A single classification prompt per item; distinguishes transient failures
+ * (429/5xx/network) from permanent ones (4xx) so only the former are retried.
  */
 async function classifyWithGroq(inputText: string): Promise<TriageResult> {
   const prompt =
@@ -64,7 +75,14 @@ async function classifyWithGroq(inputText: string): Promise<TriageResult> {
     throw new TransientAiError(`Groq request failed: ${(e as Error).message}`);
   }
 
-  if (res.status === 429 || res.status >= 500) {
+  if (res.status === 429) {
+    // Respect Retry-After (seconds) when present; otherwise back off a few seconds.
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const ms =
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 5000;
+    throw new ProviderRateLimitError(ms);
+  }
+  if (res.status >= 500) {
     throw new TransientAiError(`Groq transient status ${res.status}`);
   }
   if (!res.ok) {
@@ -79,9 +97,9 @@ async function classifyWithGroq(inputText: string): Promise<TriageResult> {
   return normalize(raw, inputText);
 }
 
-/** Deterministic, no-key stub. Good enough to demo the whole pipeline. */
+/** Deterministic, no-key classifier used when no provider is configured. */
 async function classifyWithStub(inputText: string): Promise<TriageResult> {
-  // Tiny artificial latency so status transitions are visible in the UI.
+  // Small artificial latency so intermediate status transitions are observable.
   await new Promise((r) => setTimeout(r, 300));
 
   const text = inputText.toLowerCase();

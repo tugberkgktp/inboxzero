@@ -8,8 +8,7 @@ This challenge is about **asynchronous, queue-based processing done right**: a r
 queue, a separate worker process, status tracking, retries with backoff, idempotency, and
 multi-tenant safety. The AI itself is intentionally trivial.
 
-> **Build status:** This is **Part 1 of 2** — the complete backend (API + worker + queue +
-> DB + Docker). The Next.js + React Query frontend and Vercel deployment land in Part 2.
+**Live demo:** _<add your Vercel URL here>_
 
 ---
 
@@ -24,6 +23,7 @@ multi-tenant safety. The AI itself is intentionally trivial.
 | ORM + migrations | **Prisma** | Type-safe client + real, committed migration files |
 | Auth | JWT (`jsonwebtoken` + `bcryptjs`) | Simple email/password → token |
 | AI | **Groq** (OpenAI-compatible) | Free tier, fast; *optional* — see below |
+| Frontend | Next.js (App Router) + **React Query** | Live polling that stops when done; cache invalidation |
 | Containers | Docker + docker-compose | `api` + `worker` + `postgres` + `redis` |
 
 ### AI works with **no API key**
@@ -173,8 +173,70 @@ curl -s localhost:4000/jobs/$JOB_ID -H "Authorization: Bearer $TOKEN" | jq   # p
 
 ---
 
-## Coming in Part 2
-- Next.js + React Query frontend (login/register, submit batch, live-polling job table that
-  stops when complete, retry-failed button, cache invalidation).
-- Vercel deployment + tunnel for the local backend.
-- Demo video + bonus items (SSE push, AI rate-limiting, dead-letter queue, tests).
+## Frontend (apps/web)
+
+Next.js (App Router) + React Query. Screens: register / login, submit a batch, jobs list, and
+a job detail table that updates **live**.
+
+- **Live progress:** the job detail view polls `GET /jobs/:id` every 1.5s and **stops polling
+  once the job is `completed`** (`refetchInterval` returns `false` on a terminal job) — no
+  endless background polling.
+- **Cache invalidation:** submitting a batch or retrying failed items invalidates the React
+  Query cache (`jobs` list + job detail) so the UI refreshes without a full page reload.
+- **Auth:** the JWT is stored in `localStorage`; a guard redirects unauthenticated users to
+  `/login`. Each request sends `Authorization: Bearer <token>`.
+
+### Run the frontend locally
+```bash
+cd apps/web
+cp .env.local.example .env.local     # NEXT_PUBLIC_API_URL=http://localhost:4000
+npm install
+npm run dev                          # http://localhost:3000
+```
+Open http://localhost:3000, register, and submit the pre-filled sample batch (it includes a
+`FAIL` line so you can watch a retry → failure → manual retry).
+
+---
+
+## Deployment
+
+**Frontend → Vercel (required)**
+1. Import the repo in Vercel; set the **Root Directory** to `apps/web`.
+2. Set the env var `NEXT_PUBLIC_API_URL` to your backend's public URL (the tunnel URL below,
+   or a cloud backend URL).
+3. Deploy. Vercel gives you the live URL — put it at the top of this README.
+
+**Backend → local + tunnel (chosen approach)**
+The backend, worker, Postgres and Redis run locally via Docker. To let the live Vercel site
+reach the local API, expose it with a tunnel (the worker stays private — only the API is public):
+
+```bash
+# 1. Bring up the backend stack
+docker compose up --build
+
+# 2. In another terminal, expose the API publicly (no account needed)
+cloudflared tunnel --url http://localhost:4000
+# -> prints a public https URL, e.g. https://random-words.trycloudflare.com
+```
+
+Then in Vercel set `NEXT_PUBLIC_API_URL` to that tunnel URL and redeploy. `CORS_ORIGIN=*`
+(default) lets the Vercel origin call the API; tighten it to your Vercel domain if you prefer.
+
+> Why a tunnel: it demonstrates how a deployed frontend reaches a backend across origins
+> (CORS, env-based API URLs, base URLs) without hosting the backend in the cloud.
+
+---
+
+## Submission checklist
+
+- [ ] Repo link
+- [ ] Live Vercel URL (top of this README)
+- [ ] Backend location: **local + cloudflared tunnel** — `cloudflared tunnel --url http://localhost:4000`
+- [ ] Test account: register any email/password in the UI (e.g. `demo@demo.com` / `password123`)
+- [ ] AI provider: **Groq** (`llama-3.3-70b-versatile`); falls back to a stub if no key
+- [ ] Queue/broker: **BullMQ on Redis**; retry = exponential backoff (3 attempts), idempotency = item-id-keyed results + status guard + queue dedup
+- [ ] `.env.example` committed
+- [ ] Migration file(s) committed (`apps/api/prisma/migrations/`)
+- [ ] `docker compose up` brings up API + worker + DB + broker
+- [ ] Demo video link
+- [ ] No secrets committed

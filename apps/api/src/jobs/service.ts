@@ -18,6 +18,9 @@ export async function createJob(userId: string, rawItems: string[]) {
   if (items.length > env.MAX_BATCH_ITEMS) {
     throw badRequest(`Batch exceeds the limit of ${env.MAX_BATCH_ITEMS} items.`);
   }
+  if (items.some((t) => t.length > env.MAX_ITEM_CHARS)) {
+    throw badRequest(`Each item must be at most ${env.MAX_ITEM_CHARS} characters.`);
+  }
 
   const job = await prisma.$transaction(async (tx) => {
     const created = await tx.job.create({
@@ -26,8 +29,9 @@ export async function createJob(userId: string, rawItems: string[]) {
         status: JobStatus.processing,
         totalItems: items.length,
         items: {
-          create: items.map((inputText) => ({
+          create: items.map((inputText, position) => ({
             userId, // denormalized for safe scoping
+            position, // preserve input order for stable display
             inputText,
             status: ItemStatus.queued,
           })),
@@ -66,7 +70,7 @@ export async function listJobs(userId: string) {
 export async function getJob(userId: string, jobId: string) {
   const job = await prisma.job.findFirst({
     where: { id: jobId, userId },
-    include: { items: { orderBy: { updatedAt: "asc" } } },
+    include: { items: { orderBy: { position: "asc" } } },
   });
   if (!job) throw notFound("Job not found.");
 
@@ -99,7 +103,8 @@ export async function retryFailedItems(userId: string, jobId: string) {
   await prisma.$transaction([
     prisma.item.updateMany({
       where: { id: { in: failed.map((f) => f.id) } },
-      data: { status: ItemStatus.queued, error: null },
+      // Reset attempts so the manual retry gets a fresh attempt budget.
+      data: { status: ItemStatus.queued, error: null, attempts: 0 },
     }),
     // Job goes back to processing while the retried items run.
     prisma.job.update({
