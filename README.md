@@ -8,7 +8,8 @@ This challenge is about **asynchronous, queue-based processing done right**: a r
 queue, a separate worker process, status tracking, retries with backoff, idempotency, and
 multi-tenant safety. The AI itself is intentionally trivial.
 
-**Live demo:** _<add your Vercel URL here>_
+**Live demo:** https://inboxzero-two.vercel.app
+_(The frontend is always-on; the backend runs locally behind a Cloudflare tunnel — see [Deployment](#deployment). If the live app can't reach the backend, the tunnel/laptop is offline; the demo video shows the full working flow.)_
 
 ---
 
@@ -45,9 +46,10 @@ real Groq inference automatically. (Provider used: **Groq**, model `llama-3.3-70
                                                     │
                                                     ▼
                                           Worker process (separate container)
-                                          - concurrency cap (rate-limits AI)
+                                          - concurrency cap + queue rate limiter
                                           - classify() each item with AI
                                           - retries w/ exponential backoff
+                                          - 429 -> pause & retry (no attempt lost)
                                           - writes results back to Postgres
    Client ◄──── GET /jobs/:id (poll) ─────────  Postgres (status converges)
 ```
@@ -57,9 +59,14 @@ The API **never** runs AI work — it only enqueues. All processing happens in t
 ### Retry & idempotency strategy
 
 - **Retries / backoff:** each item is enqueued as its own BullMQ job with
-  `attempts = JOB_ATTEMPTS` and exponential `backoff`. A transient failure (AI timeout, 429,
-  5xx, or the simulated failure) is retried automatically. The item is marked `failed` **only
-  after all attempts are exhausted** (we guard on `job.attemptsMade >= opts.attempts`).
+  `attempts = JOB_ATTEMPTS` and exponential `backoff`. A transient failure (network, 5xx, or
+  the simulated failure) is retried automatically. The item is marked `failed` **only after all
+  attempts are exhausted** (we guard on `job.attemptsMade >= opts.attempts`).
+- **Rate limiting (avoiding provider 429s):** two layers. *Proactive* — a BullMQ worker
+  `limiter` caps AI calls to `AI_RATE_MAX` per `AI_RATE_DURATION_MS`, sized under the provider's
+  free-tier limit. *Reactive* — a `429` pauses the worker (`worker.rateLimit()`, honoring
+  `Retry-After`) and re-runs the job **without consuming a retry attempt**. This is why a large
+  batch processes in steady waves instead of failing on rate limits.
 - **Failure isolation:** one item = one queue job, so a bad item never blocks or fails the
   rest of the batch.
 - **Idempotency:**
@@ -87,20 +94,39 @@ The migration that creates these tables is committed at
 
 ---
 
-## Running locally (Docker — recommended)
+## Running locally (from a fresh clone)
+
+The app has two halves: the **backend** (API + worker + Postgres + Redis, via Docker) and the
+**frontend** (Next.js, run separately — it lives on Vercel in production). Run both to use the
+full app locally. **No API key is required** — without `GROQ_API_KEY` the worker uses a built-in
+stub classifier, so everything works out of the box.
+
+### 1. Backend (Docker — recommended)
 
 Prereqs: Docker Desktop.
 
 ```bash
-# 1. Configure env (defaults work out of the box; AI key optional)
+# (optional) copy env defaults; compose also works with no .env at all
 cp .env.example .env
 
-# 2. Bring up the whole stack: postgres + redis + migrate + api + worker
+# Bring up the whole backend: postgres + redis + migrate + api + worker
 docker compose up --build
 ```
 
 `docker compose up` runs the `migrate` service first (applies committed migrations), then
-starts `api` (http://localhost:4000) and the separate `worker`.
+starts `api` (http://localhost:4000) and the separate `worker`. To use real AI instead of the
+stub, put a free Groq key in `.env` (`GROQ_API_KEY=...`) and restart.
+
+### 2. Frontend
+
+```bash
+cd apps/web
+cp .env.local.example .env.local     # NEXT_PUBLIC_API_URL=http://localhost:4000
+npm install
+npm run dev                          # http://localhost:3000
+```
+
+Open http://localhost:3000, register, and submit the pre-filled sample batch.
 
 **Run migrations manually** (e.g. after adding one):
 ```bash
@@ -134,7 +160,9 @@ See [`.env.example`](.env.example). Key ones:
 | `WORKER_CONCURRENCY` | Parallel AI calls cap (default 3) |
 | `JOB_ATTEMPTS` | Retry attempts per item (default 3) |
 | `JOB_BACKOFF_MS` | Base backoff delay (default 1000ms) |
+| `AI_RATE_MAX` / `AI_RATE_DURATION_MS` | Rate limiter: max AI calls per window (default 20 / 60000ms) |
 | `MAX_BATCH_ITEMS` | Batch size cap (default 50) |
+| `MAX_ITEM_CHARS` | Per-item length cap (default 4000) |
 
 ---
 
@@ -186,15 +214,9 @@ a job detail table that updates **live**.
 - **Auth:** the JWT is stored in `localStorage`; a guard redirects unauthenticated users to
   `/login`. Each request sends `Authorization: Bearer <token>`.
 
-### Run the frontend locally
-```bash
-cd apps/web
-cp .env.local.example .env.local     # NEXT_PUBLIC_API_URL=http://localhost:4000
-npm install
-npm run dev                          # http://localhost:3000
-```
-Open http://localhost:3000, register, and submit the pre-filled sample batch (it includes a
-`FAIL` line so you can watch a retry → failure → manual retry).
+To run it locally see [Running locally](#running-locally-from-a-fresh-clone). The submit box is
+pre-filled with a sample batch that includes a `FAIL` line, so you can watch a retry → failure →
+manual retry.
 
 ---
 
@@ -229,14 +251,14 @@ Then in Vercel set `NEXT_PUBLIC_API_URL` to that tunnel URL and redeploy. `CORS_
 
 ## Submission checklist
 
-- [ ] Repo link
-- [ ] Live Vercel URL (top of this README)
-- [ ] Backend location: **local + cloudflared tunnel** — `cloudflared tunnel --url http://localhost:4000`
-- [ ] Test account: register any email/password in the UI (e.g. `demo@demo.com` / `password123`)
-- [ ] AI provider: **Groq** (`llama-3.3-70b-versatile`); falls back to a stub if no key
-- [ ] Queue/broker: **BullMQ on Redis**; retry = exponential backoff (3 attempts), idempotency = item-id-keyed results + status guard + queue dedup
-- [ ] `.env.example` committed
-- [ ] Migration file(s) committed (`apps/api/prisma/migrations/`)
-- [ ] `docker compose up` brings up API + worker + DB + broker
-- [ ] Demo video link
-- [ ] No secrets committed
+- [x] Repo link: https://github.com/tugberkgktp/inboxzero
+- [x] Live Vercel URL: https://inboxzero-two.vercel.app
+- [x] Backend location: **local + cloudflared tunnel** — `cloudflared tunnel --url http://localhost:4000`
+- [x] Test account: register any email/password in the UI (e.g. `demo@demo.com` / `password123`)
+- [x] AI provider: **Groq** (`llama-3.3-70b-versatile`); falls back to a stub if no key
+- [x] Queue/broker: **BullMQ on Redis**; retry = exponential backoff (3 attempts) + rate-limit handling; idempotency = item-id-keyed results + status guard + queue dedup
+- [x] `.env.example` committed
+- [x] Migration file(s) committed (`apps/api/prisma/migrations/`)
+- [x] `docker compose up` brings up API + worker + DB + broker
+- [ ] Demo video link — _add after recording_
+- [x] No secrets committed
